@@ -1,5 +1,10 @@
 #![allow(unused_imports)]
 
+// extern crate serde_json;  // Make sure to add this at the top of your file
+use serde_json::Value;  // Import the serde_json::Value type
+
+use serde_derive::{Serialize, Deserialize};
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::{env, path::Path};
@@ -346,6 +351,27 @@ pub fn run_conda_update(ctx: &ExecutionContext) -> Result<()> {
     command.status_checked()
 }
 
+// pub fn run_mamba_update(ctx: &ExecutionContext) -> Result<()> {
+//     let mamba = require("mamba")?;
+
+//     let output = Command::new("mamba")
+//         .args(["config", "--show", "auto_activate_base"])
+//         .output_checked_utf8()?;
+//     debug!("Mamba output: {}", output.stdout);
+//     if output.stdout.contains("False") {
+//         return Err(SkipStep("auto_activate_base is set to False".to_string()).into());
+//     }
+
+//     print_separator("Mamba");
+
+//     let mut command = ctx.run_type().execute(mamba);
+//     command.args(["update", "--all", "-n", "base"]);
+//     if ctx.config().yes(Step::Mamba) {
+//         command.arg("--yes");
+//     }
+//     command.status_checked()
+// }
+
 pub fn run_mamba_update(ctx: &ExecutionContext) -> Result<()> {
     let mamba = require("mamba")?;
 
@@ -357,14 +383,72 @@ pub fn run_mamba_update(ctx: &ExecutionContext) -> Result<()> {
         return Err(SkipStep("auto_activate_base is set to False".to_string()).into());
     }
 
-    print_separator("Mamba");
+    // Get list of environments in JSON format
+    let env_output = Command::new("mamba")
+        .args(["env", "list", "--json"])
+        .output_checked_utf8()?;
+    debug!("Mamba env output: {}", env_output.stdout);
 
-    let mut command = ctx.run_type().execute(mamba);
-    command.args(["update", "--all", "-n", "base"]);
-    if ctx.config().yes(Step::Mamba) {
-        command.arg("--yes");
+    // Parse the JSON output
+    let parsed: Value = serde_json::from_str(&env_output.stdout)?;
+
+    // Get the list of environments
+    let env_list = parsed["envs"].as_array().unwrap();
+
+    // Iterate over each environment and update it
+    for env in env_list {
+        let env = env.as_str().unwrap();  // Convert Value to &str
+        print_separator(&format!("Mamba env: {}", env));
+
+        let mut command = ctx.run_type().execute(mamba.clone());
+        command.args(["update", "--all", "-n", env]);
+        if ctx.config().yes(Step::Mamba) {
+            command.arg("--yes");
+        }
+        command.status_checked()?;
+    
+        #[derive(Deserialize)]
+        struct OutdatedPackage {
+            name: String,
+        }
+
+        fn parse_outdated_packages(json: &str) -> Result<Vec<String>, serde_json::Error> {
+            let packages: Vec<OutdatedPackage> = serde_json::from_str(json)?;
+            Ok(packages.into_iter().map(|package| package.name).collect())
+        }
+
+        // Construct the path to the Python executable in the current environment
+        let python_path = format!("{}/bin/python", env);
+
+        // Update all Python packages in the current environment
+        let output = Command::new(&python_path)
+            .arg("-m")
+            .arg("pip")
+            .arg("list")
+            .arg("-o")
+            .arg("--format")
+            .arg("json")
+            .output()
+            .expect("Failed to execute command");
+
+        // Parse the output to get the list of outdated packages
+        let outdated_packages_str = String::from_utf8_lossy(&output.stdout).to_string();
+        let outdated_packages = parse_outdated_packages(&outdated_packages_str)?;
+
+        // Upgrade each outdated package
+        for package in outdated_packages {
+            Command::new(&python_path)
+                .arg("-m")
+                .arg("pip")
+                .arg("install")
+                .arg("--upgrade")
+                .arg(&package)
+                .status()
+                .expect("Failed to execute command");
+        }
     }
-    command.status_checked()
+    
+    Ok(())
 }
 
 pub fn run_pip3_update(ctx: &ExecutionContext) -> Result<()> {
@@ -466,6 +550,7 @@ pub fn run_pipupgrade_update(ctx: &ExecutionContext) -> Result<()> {
 
     Ok(())
 }
+
 pub fn run_stack_update(ctx: &ExecutionContext) -> Result<()> {
     if require("ghcup").is_ok() {
         // `ghcup` is present and probably(?) being used to install `stack`.
